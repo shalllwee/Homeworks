@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"context"
 	"net/http"
+	"net/http/httputil"
 	"flag"
 	"os"
 	"time"
@@ -11,7 +13,7 @@ import (
 )
 
 type result struct {
-	responce *http.Response
+	responce []byte
 	err error
 }
 func main() {
@@ -23,7 +25,13 @@ func main() {
 	flag.BoolVar(&help, "h", false, "showing help")
 	flag.BoolVar(&help, "help", false, "showing help")
 
+
 	flag.Parse()
+	
+	if timeout <= 0 {
+		fmt.Fprintln(os.Stderr, "Error: timout should be >0")
+		os.Exit(1)
+	}
 
 	if help == true {
 		showHelp()
@@ -42,12 +50,33 @@ func main() {
 
 	results := make(chan result, len(urls))
 	
+	contx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	for _, u := range urls {
 		go func(url string) {
-			responce, err := client.Get(url)
-			results <- result{responce: responce, err: err}
-		} (u)
+			req, err := http.NewRequestWithContext(contx, http.MethodGet, url, nil)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			
+			resp, err := client.Do(req)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			defer resp.Body.Close()
+
+			dump, err := httputil.DumpResponse(resp, true)
+			if err != nil {
+				results <- result{err: err}
+				return
+			}
+			results <- result{responce: dump}
+		}(u)
 	}
+
 
 	timeoutOccured := false
 
@@ -55,8 +84,8 @@ func main() {
 		res := <-results
 
 		if res.err == nil {
-			res.responce.Write(os.Stdout)
-			res.responce.Body.Close()
+			cancel()
+			os.Stdout.Write(res.responce)
 			os.Exit(0)
 		}
 
