@@ -1,11 +1,14 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strings"
 	"time"
+	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/google/uuid"
 	"photo-editor/internal/models"
 	"photo-editor/internal/storage"
@@ -13,15 +16,21 @@ import (
 
 type Handler struct {
 	storage *storage.MemoryStorage
+	rabbitChan *amqp.Channel
+	queueName  string
 }
 
-func NewHandler(s *storage.MemoryStorage) *Handler {
-	return &Handler{storage: s}
+func NewHandler(s *storage.MemoryStorage, ch *amqp.Channel, queueName string) *Handler {
+	return &Handler {
+	storage: 	s,
+	rabbitChan: ch,
+	queueName:  queueName,}
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /register", h.Register)
 	mux.HandleFunc("POST /login", h.Login)
+	mux.HandleFunc("POST /commit", h.CommitTask)
 	mux.HandleFunc("POST /task", h.authMiddleware(h.CreateTask))
 	mux.HandleFunc("GET /status/{task_id}", h.authMiddleware(h.GetStatus))
 	mux.HandleFunc("GET /result/{task_id}", h.authMiddleware(h.GetResult))
@@ -29,14 +38,15 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 
 func (h *Handler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Autorization")
-
-		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Unautorized"})
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			authHeader = r.Header.Get("authorization")
+		}
+		if authHeader == "" || !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Unauthorized"})
 			return
 		}
-
-		token := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer"))
+		token := strings.TrimSpace(authHeader[7:])
 		_, err := h.storage.GetSession(token)
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Unauthorized"})
@@ -45,7 +55,6 @@ func (h *Handler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 		next(w, r)
 	}
 }
-
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -118,6 +127,11 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		"token": token,
 	})
 }
+type RabbitTaskMessage struct {
+	TaskID string          `json:"task_id"`
+	Filter json.RawMessage `json:"filter"`
+	Image  string          `json:"image"`
+}
 
 // CreateTask godoc
 // @Summary      Создать задачу
@@ -131,6 +145,11 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 // @Router       /task [post]
 func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	taskID := uuid.New().String()
+	var body struct {
+		Filter json.RawMessage `json:"filter"`
+		Image  string          `json:"image"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&body)
 
 	task := &models.Task{
 		ID:        taskID,
@@ -139,14 +158,46 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	h.storage.SaveTask(task)
 
-	go func(id string) {
-		time.Sleep(2 * time.Second)
-		h.storage.CompleteTask(id, "filtered_image")
-	}(taskID)
+	if h.rabbitChan != nil {
+		msgData, _ := json.Marshal(RabbitTaskMessage{
+			TaskID: taskID,
+			Filter: body.Filter,
+			Image:  body.Image,
+		})
+
+		err := h.rabbitChan.PublishWithContext(
+			context.Background(),
+			"",
+			h.queueName,
+			false,
+			false,
+			amqp.Publishing{
+				ContentType: "application/json",
+				Body:        msgData,
+			},
+		)
+		if err != nil {
+			log.Printf("Error sending to RMQ: %v", err)
+		}
+	}
 
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"task_id": taskID,
 	})
+}
+
+func (h *Handler) CommitTask(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		TaskID string `json:"task_id"`
+		Result string `json:"result"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
+		return
+	}
+
+	h.storage.CompleteTask(req.TaskID, req.Result)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "commited"})
 }
 
 // GetStatus godoc
