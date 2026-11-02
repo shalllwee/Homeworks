@@ -12,7 +12,7 @@ type Task struct {
 type User struct {
 	ID       string `json:"id"`
 	Username string `json:"username"`
-	Password string `json:"password"`
+	PasswordHash string `json:"-"`
 }
 
 type Session struct {

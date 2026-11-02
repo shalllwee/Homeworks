@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
 
@@ -28,77 +29,68 @@ type TaskMessage struct {
 }
 
 func main() {
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		log.Println("metrics start - :9100/metrics")
+		if err := http.ListenAndServe(":9100", nil); err != nil {
+			log.Fatalf("Error starting metrics server: %v", err)
+		}
+	}()
+
 	rabbitURL := os.Getenv("RABBITMQ_URL")
 	if rabbitURL == "" {
 		rabbitURL = "amqp://guest:guest@localhost:5672/"
 	}
-
 	serverURL := os.Getenv("SERVER_URL")
 	if serverURL == "" {
 		serverURL = "http://localhost:8000"
 	}
 
 	var conn *amqp.Connection
-	var err error
-
 	for i := 0; i < 15; i++ {
+		var err error
 		conn, err = amqp.Dial(rabbitURL)
 		if err == nil {
 			break
 		}
 		time.Sleep(2 * time.Second)
 	}
-	if err != nil {
-		log.Fatalf("error connect to rabbitmq: %v", err)
-	}
 	defer conn.Close()
 
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Fatalf("error chanel rabitmq: %v", err)
-	}
+	ch, _ := conn.Channel()
 	defer ch.Close()
 
-	q, err := ch.QueueDeclare(
-		"image_tasks",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Fatalf("error queue: %v", err)
-	}
-
-	msgs, err := ch.Consume(
-		q.Name,
-		"",
-		true,
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Fatalf("error launch consumer: %v", err)
-	}
+	q, _ := ch.QueueDeclare("image_tasks", true, false, false, false, nil)
+	msgs, _ := ch.Consume(q.Name, "", true, false, false, false, nil)
 
 	for d := range msgs {
 		var task TaskMessage
 		if err := json.Unmarshal(d.Body, &task); err != nil {
-			log.Printf("error task parse: %v", err)
 			continue
 		}
-		resultBase64 := processImage(task)
 
+		resultBase64 := processImage(task)
 		commitResult(serverURL, task.TaskID, resultBase64)
 	}
 }
 
 func processImage(task TaskMessage) string {
+	var filter FilterInfo
+	_ = json.Unmarshal(task.Filter, &filter)
+	filterName := strings.ToLower(filter.Name)
+	if filterName == "" {
+		filterName = "negative"
+	}
+
+	start := time.Now()
+	defer func() {
+		duration := time.Since(start).Seconds()
+		processDuration.WithLabelValues(filterName).Observe(duration)
+		filterCounter.WithLabelValues(filterName).Inc()
+	}()
+
 	if task.Image == "" {
-		return "blank_data"
+		return "blank"
 	}
 
 	imgBytes, err := base64.StdEncoding.DecodeString(task.Image)
@@ -111,11 +103,8 @@ func processImage(task TaskMessage) string {
 		return task.Image
 	}
 
-	var filter FilterInfo
-	_ = json.Unmarshal(task.Filter, &filter)
-
 	var processed image.Image
-	switch strings.ToLower(filter.Name) {
+	switch filterName {
 	case "negative":
 		processed = ApplyNegative(img)
 	case "flipx", "flip":
@@ -129,24 +118,17 @@ func processImage(task TaskMessage) string {
 	}
 
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, processed); err != nil {
-		log.Printf("error png: %v", err)
-		return task.Image
-	}
-
+	_ = png.Encode(&buf, processed)
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
 func commitResult(serverURL, taskID, result string) {
-	payload := map[string]string{
+	payload, _ := json.Marshal(map[string]string{
 		"task_id": taskID,
 		"result":  result,
+	})
+	resp, err := http.Post(serverURL+"/commit", "application/json", bytes.NewReader(payload))
+	if err == nil {
+		_ = resp.Body.Close()
 	}
-	body, _ := json.Marshal(payload)
-
-	resp, err := http.Post(serverURL+"/commit", "application/json", bytes.NewReader(body))
-	if err != nil {
-		return
-	}
-	defer resp.Body.Close()
 }

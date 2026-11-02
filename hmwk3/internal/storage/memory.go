@@ -1,13 +1,10 @@
 package storage
 
 import (
-	"errors"
 	"sync"
-
 	"photo-editor/internal/models"
 )
 
-var ErrNotFound = errors.New("not found")
 
 type MemoryStorage struct {
 	mu       sync.RWMutex
@@ -24,10 +21,13 @@ func NewMemoryStorage() *MemoryStorage {
 	}
 }
 
-func (s *MemoryStorage) SaveTask(task *models.Task) {
+func (s *MemoryStorage) SaveTask(task *models.Task) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tasks[task.ID] = task
+
+	taskCopy := *task
+	s.tasks[task.ID] = &taskCopy
+	return nil
 }
 
 func (s *MemoryStorage) GetTask(id string) (*models.Task, error) {
@@ -37,22 +37,33 @@ func (s *MemoryStorage) GetTask(id string) (*models.Task, error) {
 	if !exists {
 		return nil, ErrNotFound
 	}
-	return task, nil
+	taskCopy := *task
+	return &taskCopy, nil
 }
 
-func (s *MemoryStorage) CompleteTask(id string, result string) {
+func (s *MemoryStorage) CompleteTask(id string, result string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if task, exists := s.tasks[id]; exists {
-		task.Status = "ready"
-		task.Result = result
+	task, exists := s.tasks[id]
+	if !exists {
+		return ErrNotFound
 	}
+	task.Status = "ready"
+	task.Result = result
+	return nil
 }
 
-func (s *MemoryStorage) SaveUser(user *models.User) {
+func (s *MemoryStorage) SaveUser(user *models.User) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.users[user.Username] = user
+
+	if _, exists := s.users[user.Username]; exists {
+		return ErrAlreadyExist
+	}
+
+	userCopy := *user
+	s.users[user.Username] = &userCopy
+	return nil
 }
 
 func (s *MemoryStorage) GetUser(username string) (*models.User, error) {
@@ -62,21 +73,28 @@ func (s *MemoryStorage) GetUser(username string) (*models.User, error) {
 	if !exists {
 		return nil, ErrNotFound
 	}
-	return user, nil
+	userCopy := *user
+	return &userCopy, nil
 }
 
-func (s *MemoryStorage) SaveSession(session *models.Session) {
+func (s *MemoryStorage) SaveSession(session *models.Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.sessions[session.SessionID] = session
+
+	sessCopy := *session
+	s.sessions[session.SessionID] = &sessCopy
+	return nil
 }
 
 func (s *MemoryStorage) GetSession(token string) (*models.Session, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+
 	session, exists := s.sessions[token]
 	if !exists {
 		return nil, ErrNotFound
 	}
-	return session, nil
+
+	sessCopy := *session
+	return &sessCopy, nil
 }

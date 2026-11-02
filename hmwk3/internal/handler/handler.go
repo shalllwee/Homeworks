@@ -10,21 +10,23 @@ import (
 	"time"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/google/uuid"
+	"golang.org/x/crypto/bcrypt"
 	"photo-editor/internal/models"
 	"photo-editor/internal/storage"
 )
 
 type Handler struct {
-	storage *storage.MemoryStorage
+	storage storage.Storage
 	rabbitChan *amqp.Channel
 	queueName  string
 }
 
-func NewHandler(s *storage.MemoryStorage, ch *amqp.Channel, queueName string) *Handler {
+func NewHandler(s storage.Storage, ch *amqp.Channel, queueName string) *Handler {
 	return &Handler {
-	storage: 	s,
-	rabbitChan: ch,
-	queueName:  queueName,}
+		storage: 	s,
+		rabbitChan: ch,
+		queueName:  queueName,
+	}
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
@@ -81,15 +83,37 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	username := strings.TrimSpace(req.Username)
+	password := strings.TrimSpace(req.Password)
+	if username == "" || password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username and password cant be empty"})
+		return
+	}
+
+	hashPassword, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "fail hash password"})
+		return
+	}
+
 	user := &models.User{
 		ID:       uuid.New().String(),
-		Username: req.Username,
-		Password: req.Password,
+		Username: username,
+		PasswordHash: string(hashPassword),
 	}
-	h.storage.SaveUser(user)
+	
+	if err := h.storage.SaveUser(user); err != nil {
+		if errors.Is(err, storage.ErrAlreadyExist) {
+			writeJSON(w, http.StatusConflict, map[string]string{"error": "user already exist"})
+			return
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 
-	writeJSON(w, http.StatusCreated, map[string]string{"message": "register done"})
+	writeJSON(w, http.StatusCreated, map[string]string{"message": "registered successfully"})
 }
+
 
 // Login godoc
 // @Summary      Вход в систему
@@ -112,17 +136,31 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.storage.GetUser(req.Username)
-	if err != nil || user.Password != req.Password {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid "})
+	username := strings.TrimSpace(req.Username)
+	password := strings.TrimSpace(req.Password)
+	if username == "" || password == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username and password cant be empty"})
 		return
 	}
 
+	user, err := h.storage.GetUser(username)
+	if err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid login or password"})
+		return
+	}
 	token := uuid.New().String()
-	h.storage.SaveSession(&models.Session{
+	if err := h.storage.SaveSession(&models.Session{
 		UserID:    user.ID,
 		SessionID: token,
-	})
+	}); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]string{
 		"token": token,
 	})
@@ -156,7 +194,10 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		Status:    "in_progress",
 		CreatedAt: time.Now(),
 	}
-	h.storage.SaveTask(task)
+	if err := h.storage.SaveTask(task); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
 
 	if h.rabbitChan != nil {
 		msgData, _ := json.Marshal(RabbitTaskMessage{
@@ -196,8 +237,12 @@ func (h *Handler) CommitTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	h.storage.CompleteTask(req.TaskID, req.Result)
-	writeJSON(w, http.StatusOK, map[string]string{"status": "commited"})
+	if err := h.storage.CompleteTask(req.TaskID, req.Result); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "committed"})
 }
 
 // GetStatus godoc

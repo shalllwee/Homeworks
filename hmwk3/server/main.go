@@ -5,7 +5,10 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"database/sql"
 
+	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 	httpSwagger "github.com/swaggo/http-swagger/v2"
 	amqp "github.com/rabbitmq/amqp091-go"
 	_ "photo-editor/docs"
@@ -13,40 +16,40 @@ import (
 	"photo-editor/internal/storage"
 )
 
-func connectRabbitMQ(url string) (*amqp.Connection, *amqp.Channel) {
-	var conn *amqp.Connection
-	var err error
-
+func connectRabbitMQ(url string) *amqp.Channel {
 	for i := 0; i < 15; i++ {
-		conn, err = amqp.Dial(url)
+		conn, err := amqp.Dial(url)
 		if err == nil {
-			break
+			ch, _ := conn.Channel()
+			_, _ = ch.QueueDeclare("image_tasks", true, false, false, false, nil)
+			log.Println("connected to RabbitQM")
+			return ch
 		}
 		time.Sleep(2 * time.Second)
 	}
-	if err != nil {
-		log.Fatalf("error connect rabbitqm: %v", err)
-	}
-
-	ch, err := conn.Channel()
-	if err != nil {
-		log.Fatalf("error channel rabbitmq: %v", err)
-	}
-
-	_, err = ch.QueueDeclare(
-		"image_tasks",
-		true, 
-		false,
-		false,
-		false,
-		nil,
-	)
-	if err != nil {
-		log.Fatalf("error queue: %v", err)
-	}
-
-	return conn, ch
+	log.Fatal("Error connecting to RabbitMQ")
+	return nil
 }
+
+func connectPostgres(dsn string) *sql.DB {
+	for i := 0; i < 15; i++ {
+		db, err := sql.Open("postgres", dsn)
+		if err == nil && db.Ping() == nil {
+			log.Println("connected to PostgreSQL")
+			return db
+		}
+		time.Sleep(2 * time.Second)
+	}
+	log.Fatal("Error connectiong to PostgreSQL")
+	return nil
+}
+
+func connectRedis(addr string) *redis.Client {
+	rdb := redis.NewClient(&redis.Options{Addr: addr})
+	log.Println("Connected to Redis")
+	return rdb
+}
+
 
 
 // @title                      Photo Editor
@@ -58,12 +61,24 @@ func connectRabbitMQ(url string) (*amqp.Connection, *amqp.Channel) {
 // @in                         header
 // @name                       Authorization
 func main() {
+	pgDSN := os.Getenv("POSTGRES_DSN")
+	
+	if pgDSN == "" {
+		pgDSN = "postgres://postgres:postgres@localhost:5432/photo_db?sslmode=disable"
+	}
+	db := connectPostgres(pgDSN)
+
+	redisAddr := os.Getenv("REDIS_ADDR")
+	if redisAddr == "" {
+		redisAddr = "localhost:6379"
+	}
+	rdb := connectRedis(redisAddr)
 	rabbitURL := os.Getenv("RABBITMQ_URL")
 	var ch *amqp.Channel
 	if rabbitURL != "" {
-		_, ch = connectRabbitMQ(rabbitURL)
+		ch = connectRabbitMQ(rabbitURL)
 	}
-	store := storage.NewMemoryStorage()
+	store := storage.NewDBStorage(db, rdb)
 	h := handler.NewHandler(store, ch, "image_tasks")
 
 	mux := http.NewServeMux()
