@@ -10,11 +10,15 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    defaults:
+      run:
+        working-directory: hmwk3
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Set up Docker Compose
+      - name: Start Docker Compose
         run: |
           docker compose up --build -d
           sleep 15
@@ -24,15 +28,15 @@ jobs:
         with:
           python-version: '3.13'
 
-      - name: Install test dependencies
+      - name: Install dependencies
         run: |
           pip install pytest requests
 
-      - name: Run pytest
+      - name: Run Pytest
         run: |
           pytest tests3.py -v
 
       - name: Stop services
         if: always()
         run: |
-          docker compose down
+          docker compose down -v

@@ -1,24 +1,39 @@
 package main
 
 import (
+	"encoding/json"
 	"image"
 	"image/color"
 
 	"github.com/disintegration/imaging"
 )
 
+type FilterParams struct {
+	Sigma float64 `json:"sigma"`
+}
+
+func parseParam(raw json.RawMessage) float64 {
+	var p FilterParams
+	if err := json.Unmarshal(raw, &p); err == nil && p.Sigma > 0 {
+		return p.Sigma
+	}
+	return 2.0
+}
+
+
+
 func ApplyNegative(img image.Image) image.Image {
 	bounds := img.Bounds()
-	out := image.NewRGBA(bounds)
+	out := image.NewNRGBA(bounds)
 
 	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			r, g, b, a := img.At(x, y).RGBA()
-			out.Set(x, y, color.RGBA{
-				R: 255 - uint8(r>>8),
-				G: 255 - uint8(g>>8),
-				B: 255 - uint8(b>>8),
-				A: uint8(a >> 8),
+			c := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+			out.SetNRGBA(x, y, color.NRGBA{
+				R: 255 - c.R,
+				G: 255 - c.G,
+				B: 255 - c.B,
+				A: c.A,
 			})
 		}
 	}
@@ -27,23 +42,26 @@ func ApplyNegative(img image.Image) image.Image {
 
 func ApplyFlipX(img image.Image) image.Image {
 	bounds := img.Bounds()
-	out := image.NewRGBA(bounds)
+	out := image.NewNRGBA(bounds)
 
-	width := bounds.Max.X
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+	minY := bounds.Min.Y
+	maxY := bounds.Max.Y
+
+	for y := minY; y < maxY; y++ {
+		flippedY := maxY - 1 - (y - minY)
 		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			c := img.At(x, y)
-			flippedX := width - 1 - (x - bounds.Min.X)
-			out.Set(flippedX, y, c)
+			out.Set(x, flippedY, img.At(x, y))
 		}
 	}
 	return out
 }
 
-func ApplyBlur(img image.Image) image.Image {
-	return imaging.Blur(img, 2.0)
+func ApplyBlur(img image.Image, rawParams json.RawMessage) image.Image {
+	val := parseParam(rawParams)
+	return imaging.Blur(img, val)
 }
 
-func ApplySharpen(img image.Image) image.Image {
-	return imaging.Sharpen(img, 2.0)
+func ApplySharpen(img image.Image, rawParams json.RawMessage) image.Image {
+	val := parseParam(rawParams)
+	return imaging.Sharpen(img, val)
 }

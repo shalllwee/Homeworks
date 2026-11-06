@@ -4,10 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 	"time"
+	"encoding/base64"
 	amqp "github.com/rabbitmq/amqp091-go"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
@@ -49,12 +49,13 @@ func (h *Handler) authMiddleware(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		token := strings.TrimSpace(authHeader[7:])
-		_, err := h.storage.GetSession(token)
+		session, err := h.storage.GetSession(token)
 		if err != nil {
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Unauthorized"})
 			return
 		}
-		next(w, r)
+		ctx := context.WithValue(r.Context(), "user_id", session.UserID)
+		next(w, r.WithContext(ctx))
 	}
 }
 func writeJSON(w http.ResponseWriter, status int, data any) {
@@ -165,9 +166,20 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		"token": token,
 	})
 }
+
+type FilterRequest struct {
+	Name       string          `json:"name" example:"negative"`
+	Parameters json.RawMessage `json:"parameters,omitempty" swaggertype:"primitive,string" example:"{\"sigma\": 2.0}"`
+}
+
+type CreateTaskRequest struct {
+	Filter FilterRequest `json:"filter"`
+	Image  string        `json:"image"`
+}
+
 type RabbitTaskMessage struct {
 	TaskID string          `json:"task_id"`
-	Filter json.RawMessage `json:"filter"`
+	Filter FilterRequest   `json:"filter"`
 	Image  string          `json:"image"`
 }
 
@@ -178,19 +190,45 @@ type RabbitTaskMessage struct {
 // @Security     BearerAuth
 // @Accept       json
 // @Produce      json
+// @Param        request body handler.CreateTaskRequest true "параметры задачи"
 // @Success      201  {object}  map[string]string
 // @Failure      401  {object}  map[string]string
+// @Failure      503  {object}  map[string]string
 // @Router       /task [post]
 func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
-	taskID := uuid.New().String()
-	var body struct {
-		Filter json.RawMessage `json:"filter"`
-		Image  string          `json:"image"`
+	userID, ok := r.Context().Value("user_id").(string)
+	if !ok || userID == "" {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "Unauthorized"})
+		return
 	}
-	_ = json.NewDecoder(r.Body).Decode(&body)
 
+	r.Body = http.MaxBytesReader(w, r.Body, 15<<20)
+
+	var req CreateTaskRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json or payload too large"})
+		return
+	}
+
+	filterName := strings.ToLower(req.Filter.Name)
+	if filterName != "negative" && filterName != "flipx" && filterName != "blur" && filterName != "sharpen" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid filter"})
+		return
+	}
+
+	if strings.TrimSpace(req.Image) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "image payload can't be empty"})
+		return
+	}
+
+	if h.rabbitChan == nil || h.rabbitChan.IsClosed() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "message broker is unavalable"})
+		return
+	}
+	taskID := uuid.New().String()
 	task := &models.Task{
 		ID:        taskID,
+		UserID:    userID,
 		Status:    "in_progress",
 		CreatedAt: time.Now(),
 	}
@@ -199,27 +237,27 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if h.rabbitChan != nil {
-		msgData, _ := json.Marshal(RabbitTaskMessage{
-			TaskID: taskID,
-			Filter: body.Filter,
-			Image:  body.Image,
-		})
+	msgBytes, _ := json.Marshal(RabbitTaskMessage{
+		TaskID: taskID,
+		Filter: req.Filter,
+		Image:  req.Image,
+	})
 
-		err := h.rabbitChan.PublishWithContext(
-			context.Background(),
-			"",
-			h.queueName,
-			false,
-			false,
-			amqp.Publishing{
-				ContentType: "application/json",
-				Body:        msgData,
-			},
-		)
-		if err != nil {
-			log.Printf("Error sending to RMQ: %v", err)
-		}
+	err := h.rabbitChan.PublishWithContext(
+		r.Context(),
+		"",
+		h.queueName,
+		false,
+		false,
+		amqp.Publishing{
+			DeliveryMode: amqp.Persistent,
+			ContentType:  "application/json",
+			Body:         msgBytes,
+		},
+	)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "failed to queue task"})
+		return
 	}
 
 	writeJSON(w, http.StatusCreated, map[string]string{
@@ -257,6 +295,7 @@ func (h *Handler) CommitTask(w http.ResponseWriter, r *http.Request) {
 // @Failure      404  {object}  map[string]string
 // @Router       /status/{task_id} [get]
 func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
+	currentUserID := r.Context().Value("user_id").(string)
 	taskID := r.PathValue("task_id")
 
 	task, err := h.storage.GetTask(taskID)
@@ -266,6 +305,11 @@ func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	if task.UserID != currentUserID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
 		return
 	}
 
@@ -279,14 +323,16 @@ func (h *Handler) GetStatus(w http.ResponseWriter, r *http.Request) {
 // @Description  Выдаёт результат завершенной задачи
 // @Tags         tasks
 // @Security     BearerAuth
-// @Produce      json
+// @Produce      image/png
 // @Param        task_id path string true "ID задачи"
-// @Success      200  {object}  map[string]string
+// @Success      200  {string}  binary "PNG"
 // @Failure      400  {object}  map[string]string
 // @Failure      401  {object}  map[string]string
+// @Failure      403 {object} map[string]string
 // @Failure      404  {object}  map[string]string
 // @Router       /result/{task_id} [get]
 func (h *Handler) GetResult(w http.ResponseWriter, r *http.Request) {
+	currentUserID := r.Context().Value("user_id").(string)
 	taskID := r.PathValue("task_id")
 
 	task, err := h.storage.GetTask(taskID)
@@ -299,12 +345,25 @@ func (h *Handler) GetResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if task.UserID != currentUserID {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden"})
+		return
+	}
+
 	if task.Status != "ready" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "task not ready yet"})
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{
-		"result": task.Result,
-	})
+	imgBytes, err := base64.StdEncoding.DecodeString(task.Result)
+	if err != nil {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(task.Result))
+		return
+	}
+
+	w.Header().Set("Content-Type", "image/png")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(imgBytes)
 }

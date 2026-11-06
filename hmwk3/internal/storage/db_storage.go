@@ -24,17 +24,17 @@ func NewDBStorage(db *sql.DB, rdb *redis.Client) *DBStorage {
 }
 
 func (s *DBStorage) SaveTask(task *models.Task) error {
-	query := `INSERT INTO tasks (id, status, result, created_at) VALUES ($1, $2, $3, $4)`
-	_, err := s.db.Exec(query, task.ID, task.Status, task.Result, task.CreatedAt)
+	query := `INSERT INTO tasks (id, user_id, status, result, created_at) VALUES ($1, $2, $3, $4, $5)`
+	_, err := s.db.Exec(query, task.ID, task.UserID, task.Status, task.Result, task.CreatedAt)
 	return err
 }
 
 func (s *DBStorage) GetTask(id string) (*models.Task, error) {
-	query := `SELECT id, status, COALESCE(result, ''), created_at FROM tasks WHERE id = $1`
+	query := `SELECT id, user_id, status, COALESCE(result, ''), created_at FROM tasks WHERE id = $1`
 	row := s.db.QueryRow(query, id)
 
 	var task models.Task
-	err := row.Scan(&task.ID, &task.Status, &task.Result, &task.CreatedAt)
+	err := row.Scan(&task.ID, &task.UserID, &task.Status, &task.Result, &task.CreatedAt)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
@@ -45,7 +45,7 @@ func (s *DBStorage) GetTask(id string) (*models.Task, error) {
 }
 
 func (s *DBStorage) CompleteTask(id string, result string) error {
-	query := `UPDATE tasks SET status = 'ready', result = $1 WHERE id = $2`
+	query := `UPDATE tasks SET status = 'ready', result = $1 WHERE id = $2 AND status = 'in_progress'`
 	res, err := s.db.Exec(query, result, id)
 	if err != nil {
 		return err

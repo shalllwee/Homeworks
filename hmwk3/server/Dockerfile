@@ -17,6 +17,7 @@ FROM alpine:3.20
 
 WORKDIR /app
 COPY --from=builder /build/server_bin /app/server_bin
+COPY migrations /app/migrations
 
 EXPOSE 8000
 CMD ["/app/server_bin"]

@@ -24,7 +24,7 @@ type FilterInfo struct {
 
 type TaskMessage struct {
 	TaskID string          `json:"task_id"`
-	Filter json.RawMessage `json:"filter"`
+	Filter FilterInfo      `json:"filter"`
 	Image  string          `json:"image"`
 }
 
@@ -47,17 +47,24 @@ func main() {
 	}
 
 	var conn *amqp.Connection
+	var err error
 	for i := 0; i < 15; i++ {
-		var err error
 		conn, err = amqp.Dial(rabbitURL)
 		if err == nil {
+			log.Println("Success connecting to RabbitQM")
 			break
 		}
 		time.Sleep(2 * time.Second)
 	}
+	if conn == nil || err != nil {
+		log.Fatalf("fail connecting to RabbitMQ, adress %s: %v", rabbitURL, err)
+	}
 	defer conn.Close()
 
-	ch, _ := conn.Channel()
+	ch, err := conn.Channel()
+	if err != nil {
+		log.Fatalf("Error creating channel rmq %v", err )
+	}
 	defer ch.Close()
 
 	q, _ := ch.QueueDeclare("image_tasks", true, false, false, false, nil)
@@ -75,9 +82,7 @@ func main() {
 }
 
 func processImage(task TaskMessage) string {
-	var filter FilterInfo
-	_ = json.Unmarshal(task.Filter, &filter)
-	filterName := strings.ToLower(filter.Name)
+	filterName := strings.ToLower(task.Filter.Name)
 	if filterName == "" {
 		filterName = "negative"
 	}
@@ -110,9 +115,9 @@ func processImage(task TaskMessage) string {
 	case "flipx", "flip":
 		processed = ApplyFlipX(img)
 	case "blur":
-		processed = ApplyBlur(img)
+		processed = ApplyBlur(img, task.Filter.Parameters)
 	case "sharpen":
-		processed = ApplySharpen(img)
+		processed = ApplySharpen(img, task.Filter.Parameters)
 	default:
 		processed = ApplyNegative(img)
 	}

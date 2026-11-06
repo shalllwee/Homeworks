@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"context"
 	"os"
 	"time"
 	"database/sql"
@@ -45,9 +46,17 @@ func connectPostgres(dsn string) *sql.DB {
 }
 
 func connectRedis(addr string) *redis.Client {
+	ctx := context.Background()
 	rdb := redis.NewClient(&redis.Options{Addr: addr})
-	log.Println("Connected to Redis")
-	return rdb
+	for i := 0; i <= 15; i++ {
+		if err := rdb.Ping(ctx).Err(); err == nil {
+			log.Println("connected to redis")
+			return rdb
+		}
+		time.Sleep(2 * time.Second)
+	}
+	log.Fatal("error connecting to Redis")
+	return nil
 }
 
 
@@ -64,26 +73,35 @@ func main() {
 	pgDSN := os.Getenv("POSTGRES_DSN")
 	
 	if pgDSN == "" {
-		pgDSN = "postgres://postgres:postgres@localhost:5432/photo_db?sslmode=disable"
+		pgDSN = "postgres://postgres:password@localhost:5432/photo_db?sslmode=disable"
 	}
 	db := connectPostgres(pgDSN)
+	defer db.Close()
 
+	if err := storage.RunMigrations(db, "migrations"); err != nil {
+		log.Fatalf("Error running migrations: %v", err)
+	}
 	redisAddr := os.Getenv("REDIS_ADDR")
 	if redisAddr == "" {
 		redisAddr = "localhost:6379"
 	}
 	rdb := connectRedis(redisAddr)
+	defer rdb.Close()
 	rabbitURL := os.Getenv("RABBITMQ_URL")
-	var ch *amqp.Channel
-	if rabbitURL != "" {
-		ch = connectRabbitMQ(rabbitURL)
+	if rabbitURL == "" {
+		rabbitURL = "amqp://guest:guest@localhost:5672/"
 	}
+	ch := connectRabbitMQ(rabbitURL)
+	defer ch.Close()
 	store := storage.NewDBStorage(db, rdb)
 	h := handler.NewHandler(store, ch, "image_tasks")
 
 	mux := http.NewServeMux()
 
 	mux.Handle("/swagger/", httpSwagger.Handler())
+	mux.HandleFunc("GET /swagger", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/swagger/index.html", http.StatusMovedPermanently)
+	})
 
 	h.RegisterRoutes(mux)
 

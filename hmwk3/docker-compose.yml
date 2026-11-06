@@ -9,7 +9,6 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./sql/dbinit.sql:/docker-entrypoint-initdb.d/init.sql
       - pgdata:/var/lib/postgresql/data
 
   redis:
@@ -21,9 +20,12 @@ services:
   rabbitmq:
     image: rabbitmq:3-management-alpine
     container_name: rabbitmq
+    hostname: rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
+    volumes:
+      - rabbitdata:/var/lib/rabbitmq 
 
   server:
     build:
@@ -51,10 +53,10 @@ services:
       - "9100:9100"
     environment:
       - RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/
-      - SERVER_URL=http://server:8000
+      - POSTGRES_DSN=postgres://postgres:password@postgres:5432/photo_db?sslmode=disable
     depends_on:
       - rabbitmq
-      - server
+      - postgres
 
   prometheus:
     image: prom/prometheus:latest
@@ -78,3 +80,4 @@ services:
 
 volumes:
   pgdata:
+  rabbitdata:
