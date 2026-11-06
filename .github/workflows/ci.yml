@@ -34,7 +34,7 @@ jobs:
 
       - name: Run Pytest
         run: |
-          pytest tests3.py -v
+          pytest tests3right.py -v
 
       - name: Stop services
         if: always()

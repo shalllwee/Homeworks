@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"database/sql"
 	"encoding/json"
 	"image"
 	_ "image/jpeg"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	_ "github.com/lib/pq"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -37,17 +39,23 @@ func main() {
 		}
 	}()
 
+
+	pgDSN := os.Getenv("POSTGRES_DSN")
+	if pgDSN == "" {
+		pgDSN = "postgres://postgres:password@postgres:5432/photo_db?sslmode=disable"
+	}
+	db, err := sql.Open("postgres", pgDSN)
+	if err != nil {
+		log.Fatalf("Failed to open DB: %v", err)
+	}
+	defer db.Close()
+
 	rabbitURL := os.Getenv("RABBITMQ_URL")
 	if rabbitURL == "" {
-		rabbitURL = "amqp://guest:guest@localhost:5672/"
-	}
-	serverURL := os.Getenv("SERVER_URL")
-	if serverURL == "" {
-		serverURL = "http://localhost:8000"
+		rabbitURL = "amqp://guest:guest@rabbitmq:5672/"
 	}
 
 	var conn *amqp.Connection
-	var err error
 	for i := 0; i < 15; i++ {
 		conn, err = amqp.Dial(rabbitURL)
 		if err == nil {
@@ -77,7 +85,13 @@ func main() {
 		}
 
 		resultBase64 := processImage(task)
-		commitResult(serverURL, task.TaskID, resultBase64)
+		query := `UPDATE tasks SET status = 'ready', result = $1 WHERE id = $2`
+		_, err = db.Exec(query, resultBase64, task.TaskID)
+		if err != nil {
+			log.Printf("error updating task in DB: %v", err)
+		} else {
+			log.Printf("Task completed: %s ", task.TaskID)
+		}
 	}
 }
 
@@ -125,15 +139,4 @@ func processImage(task TaskMessage) string {
 	var buf bytes.Buffer
 	_ = png.Encode(&buf, processed)
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
-}
-
-func commitResult(serverURL, taskID, result string) {
-	payload, _ := json.Marshal(map[string]string{
-		"task_id": taskID,
-		"result":  result,
-	})
-	resp, err := http.Post(serverURL+"/commit", "application/json", bytes.NewReader(payload))
-	if err == nil {
-		_ = resp.Body.Close()
-	}
 }

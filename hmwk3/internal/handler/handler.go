@@ -355,15 +355,18 @@ func (h *Handler) GetResult(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	imgBytes, err := base64.StdEncoding.DecodeString(task.Result)
-	if err != nil {
-		w.Header().Set("Content-Type", "text/plain")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(task.Result))
-		return
+	accept := r.Header.Get("Accept")
+	if strings.Contains(accept, "text/html") || strings.Contains(accept, "image/") {
+		imgBytes, err := base64.StdEncoding.DecodeString(task.Result)
+		if err == nil {
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(imgBytes)
+			return
+		}
 	}
 
-	w.Header().Set("Content-Type", "image/png")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(imgBytes)
+	writeJSON(w, http.StatusOK, map[string]string{
+		"result": task.Result,
+	})
 }
