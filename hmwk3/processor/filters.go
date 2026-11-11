@@ -3,23 +3,32 @@ package main
 import (
 	"encoding/json"
 	"image"
+	"fmt"
 	"image/color"
 
 	"github.com/disintegration/imaging"
 )
 
 type FilterParams struct {
-	Sigma float64 `json:"sigma"`
+	Sigma *float64 `json:"sigma"`
 }
 
-func parseParam(raw json.RawMessage) float64 {
-	var p FilterParams
-	if err := json.Unmarshal(raw, &p); err == nil && p.Sigma > 0 {
-		return p.Sigma
+func parseParam(raw json.RawMessage) (float64, error) {
+	if len(raw) == 0 {
+		return 2.0, nil
 	}
-	return 2.0
+	var p FilterParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return 0, fmt.Errorf("invalid parameters: %w", err)
+	}
+	if p.Sigma == nil {
+		return 2.0, nil
+	}
+	if *p.Sigma <= 0 {
+		return 0, fmt.Errorf("sigma should be > 0 %v", *p.Sigma)
+	}
+	return *p.Sigma, nil
 }
-
 
 
 func ApplyNegative(img image.Image) image.Image {
@@ -56,12 +65,18 @@ func ApplyFlipX(img image.Image) image.Image {
 	return out
 }
 
-func ApplyBlur(img image.Image, rawParams json.RawMessage) image.Image {
-	val := parseParam(rawParams)
-	return imaging.Blur(img, val)
+func ApplyBlur(img image.Image, rawParams json.RawMessage) (image.Image, error) {
+	val, err := parseParam(rawParams)
+	if err != nil {
+		return nil, err
+	}
+	return imaging.Blur(img, val), nil
 }
 
-func ApplySharpen(img image.Image, rawParams json.RawMessage) image.Image {
-	val := parseParam(rawParams)
-	return imaging.Sharpen(img, val)
+func ApplySharpen(img image.Image, rawParams json.RawMessage) (image.Image, error) {
+	val, err := parseParam(rawParams)
+	if err != nil {
+		return nil, err
+	}
+	return imaging.Sharpen(img, val), nil
 }
