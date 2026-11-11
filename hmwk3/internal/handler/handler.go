@@ -3,6 +3,9 @@ package handler
 import (
 	"context"
 	"image"
+	_ "image/gif"
+	_ "image/png"
+	_ "image/jpeg"
 	"bytes"
 	"encoding/json"
 	"errors"
