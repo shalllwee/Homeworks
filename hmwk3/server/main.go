@@ -21,17 +21,22 @@ func connectRabbitMQ(url string) *amqp.Channel {
 	for i := 0; i < 15; i++ {
 		conn, err := amqp.Dial(url)
 		if err == nil {
-			ch, _ := conn.Channel()
-			_, _ = ch.QueueDeclare("image_tasks", true, false, false, false, nil)
-			log.Println("connected to RabbitQM")
-			return ch
+			ch, err := conn.Channel()
+			if err == nil {
+				_, err = ch.QueueDeclare("image_tasks", true, false, false, false, nil)
+				if err == nil {
+					log.Println("connected to RabbitQM")
+					return ch
+				}
+				_ = ch.Close()
+			}
+			_ = conn.Close()
 		}
 		time.Sleep(2 * time.Second)
 	}
 	log.Fatal("Error connecting to RabbitMQ")
 	return nil
 }
-
 func connectPostgres(dsn string) *sql.DB {
 	for i := 0; i < 15; i++ {
 		db, err := sql.Open("postgres", dsn)

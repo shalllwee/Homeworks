@@ -10,4 +10,4 @@ stop:
 	docker compose down
 
 test:
-	pytest tests3.py -v
+	pytest tests3right.py -v

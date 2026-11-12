@@ -2,6 +2,11 @@ package handler
 
 import (
 	"context"
+	"image"
+	_ "image/gif"
+	_ "image/png"
+	_ "image/jpeg"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -32,7 +37,6 @@ func NewHandler(s storage.Storage, ch *amqp.Channel, queueName string) *Handler 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("POST /register", h.Register)
 	mux.HandleFunc("POST /login", h.Login)
-	mux.HandleFunc("POST /commit", h.CommitTask)
 	mux.HandleFunc("POST /task", h.authMiddleware(h.CreateTask))
 	mux.HandleFunc("GET /status/{task_id}", h.authMiddleware(h.GetStatus))
 	mux.HandleFunc("GET /result/{task_id}", h.authMiddleware(h.GetResult))
@@ -85,7 +89,7 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	username := strings.TrimSpace(req.Username)
-	password := strings.TrimSpace(req.Password)
+	password := req.Password
 	if username == "" || password == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username and password cant be empty"})
 		return
@@ -138,7 +142,7 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	username := strings.TrimSpace(req.Username)
-	password := strings.TrimSpace(req.Password)
+	password := req.Password
 	if username == "" || password == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "username and password cant be empty"})
 		return
@@ -165,6 +169,10 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"token": token,
 	})
+}
+
+type FilterParamsRequest struct {
+	Sigma *float64 `json:"sigma,omitempty"`
 }
 
 type FilterRequest struct {
@@ -216,8 +224,29 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if (filterName == "blur" || filterName == "sharpen") && len(req.Filter.Parameters) > 0 {
+		var p FilterParamsRequest
+		if err := json.Unmarshal(req.Filter.Parameters, &p); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid filter parameters"})
+			return
+		}
+		if p.Sigma != nil && *p.Sigma <= 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "sigma should be more than 0"})
+			return
+		}
+	}
 	if strings.TrimSpace(req.Image) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "image payload can't be empty"})
+		return
+	}
+	imgBytes, err := base64.StdEncoding.DecodeString(req.Image)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid base64 image"})
+		return
+	}
+	_, _, err = image.DecodeConfig(bytes.NewReader(imgBytes))
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "imvalid image format"})
 		return
 	}
 
@@ -243,7 +272,7 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		Image:  req.Image,
 	})
 
-	err := h.rabbitChan.PublishWithContext(
+	err = h.rabbitChan.PublishWithContext(
 		r.Context(),
 		"",
 		h.queueName,
@@ -256,6 +285,7 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 	if err != nil {
+		_ = h.storage.CompleteTask(taskID, "")
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "failed to queue task"})
 		return
 	}
@@ -263,24 +293,6 @@ func (h *Handler) CreateTask(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]string{
 		"task_id": taskID,
 	})
-}
-
-func (h *Handler) CommitTask(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		TaskID string `json:"task_id"`
-		Result string `json:"result"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid json"})
-		return
-	}
-
-	if err := h.storage.CompleteTask(req.TaskID, req.Result); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "committed"})
 }
 
 // GetStatus godoc

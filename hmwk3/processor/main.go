@@ -2,9 +2,10 @@ package main
 
 import (
 	"bytes"
-	"encoding/base64"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"image"
 	_ "image/jpeg"
 	"image/png"
@@ -76,26 +77,43 @@ func main() {
 	defer ch.Close()
 
 	q, _ := ch.QueueDeclare("image_tasks", true, false, false, false, nil)
-	msgs, _ := ch.Consume(q.Name, "", true, false, false, false, nil)
+	if err !=  nil {
+		log.Fatalf("Error: %v", err)
+	}
+	msgs, err := ch.Consume(q.Name, "", false, false, false, false, nil)
+	if err != nil {
+		log.Fatalf("Error: %v", err)
+	}
 
 	for d := range msgs {
 		var task TaskMessage
 		if err := json.Unmarshal(d.Body, &task); err != nil {
+			log.Printf("invalid json: %v", err)
+			_ = d.Ack(false)
+			continue
+		}
+		resultBase64, err := processImage(task)
+		if err != nil {
+			log.Printf("Failed processing task %s: %v", task.TaskID, err)
+			// При ошибке обновляем статус на 'failed' и НЕ записываем мусор в 'ready'
+			_, _ = db.Exec("UPDATE tasks SET status = 'failed' WHERE id = $1", task.TaskID)
+			_ = d.Ack(false)
 			continue
 		}
 
-		resultBase64 := processImage(task)
 		query := `UPDATE tasks SET status = 'ready', result = $1 WHERE id = $2`
 		_, err = db.Exec(query, resultBase64, task.TaskID)
 		if err != nil {
-			log.Printf("error updating task in DB: %v", err)
-		} else {
-			log.Printf("Task completed: %s ", task.TaskID)
+			log.Printf("error updating task %s in DB: %v", task.TaskID, err)
+			_ = d.Nack(false, true)
+			continue
 		}
+		_ = d.Ack(false)
+		log.Printf("Task completed: %s ", task.TaskID)
 	}
 }
 
-func processImage(task TaskMessage) string {
+func processImage(task TaskMessage) (string, error) {
 	filterName := strings.ToLower(task.Filter.Name)
 	if filterName == "" {
 		filterName = "negative"
@@ -109,17 +127,17 @@ func processImage(task TaskMessage) string {
 	}()
 
 	if task.Image == "" {
-		return "blank"
+		return "", fmt.Errorf("error: no image")
 	}
 
 	imgBytes, err := base64.StdEncoding.DecodeString(task.Image)
 	if err != nil {
-		return task.Image
+		return "", fmt.Errorf("invalid image %w", err)
 	}
 
 	img, _, err := image.Decode(bytes.NewReader(imgBytes))
 	if err != nil {
-		return task.Image
+		return "", fmt.Errorf("error: fail decoding image %w", err)
 	}
 
 	var processed image.Image
@@ -129,14 +147,23 @@ func processImage(task TaskMessage) string {
 	case "flipx", "flip":
 		processed = ApplyFlipX(img)
 	case "blur":
-		processed = ApplyBlur(img, task.Filter.Parameters)
+		processed, err = ApplyBlur(img, task.Filter.Parameters)
+		if err != nil {
+			return "", err
+		}
 	case "sharpen":
-		processed = ApplySharpen(img, task.Filter.Parameters)
+		processed, err = ApplySharpen(img, task.Filter.Parameters)
+		if err != nil {
+			return "", err
+		}
 	default:
-		processed = ApplyNegative(img)
+		return "", fmt.Errorf("unknown filter: %s", filterName)
 	}
 
 	var buf bytes.Buffer
-	_ = png.Encode(&buf, processed)
-	return base64.StdEncoding.EncodeToString(buf.Bytes())
+	if err := png.Encode(&buf, processed); err != nil {
+		return "", fmt.Errorf("error encoding to png: %w", err)
+	}
+
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }
